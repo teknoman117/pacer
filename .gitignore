@@ -1,4 +1,6 @@
-.claude/
+# Ignore local Claude Code state, but keep project skills tracked.
+.claude/*
+!.claude/skills/
 __pycache__/
 *.egg-info/
 build/
