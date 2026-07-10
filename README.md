@@ -1,6 +1,6 @@
 # pacer
 
-Pipe stdin to stdout at a bandwidth cap that varies by time of day.
+Pipe stdin to stdout at a bandwidth capped by time of day
 
 Set a base rate, then layer on zero or more time-of-day *windows* that override
 it — e.g. crawl during the day but open the taps overnight to respect an ISP's
