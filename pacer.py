@@ -29,6 +29,16 @@ STATUS_INTERVAL = 0.2
 # Window over which the "current rate" is averaged, in seconds.
 RATE_WINDOW = 1.0
 
+# Default burst = this many seconds of traffic at the active rate. Small so a
+# stalled output (e.g. a high-latency VPN/satellite link whose send buffer keeps
+# filling) can't hoard tokens and then dump a big catch-up burst. Overridable
+# with --burst.
+DEFAULT_BURST_SECONDS = 0.1
+
+# Never let the computed burst fall below this, so very low rates still move data
+# in reasonably-sized (not byte-at-a-time) writes.
+MIN_BURST = 4 * 1024
+
 SECONDS_PER_DAY = 24 * 60 * 60
 
 _UNITS = {
@@ -63,6 +73,29 @@ def parse_rate(text):
             f"unknown unit {unit!r} in rate {text!r}"
         )
     return float(value) * _UNITS[unit]
+
+
+def parse_size(text):
+    """Parse a byte-size string (like parse_rate but without 'unlimited')."""
+    m = _RATE_RE.match(text.strip().lower())
+    if not m:
+        raise argparse.ArgumentTypeError(f"invalid size: {text!r}")
+    value, unit = m.group(1), m.group(2) or "b"
+    if unit not in _UNITS:
+        raise argparse.ArgumentTypeError(f"unknown unit {unit!r} in size {text!r}")
+    size = float(value) * _UNITS[unit]
+    if size < 1:
+        raise argparse.ArgumentTypeError(f"size must be at least 1 byte: {text!r}")
+    return size
+
+
+def burst_for(rate, override):
+    """Bucket capacity in bytes for a rate: explicit --burst, else the default."""
+    if rate is None:
+        return 0
+    if override is not None:
+        return max(1, int(override))
+    return max(MIN_BURST, int(rate * DEFAULT_BURST_SECONDS))
 
 
 def _parse_clock(text):
@@ -162,12 +195,18 @@ def format_duration(seconds):
 
 
 class TokenBucket:
-    """Continuously-refilling byte bucket. rate=None disables limiting."""
+    """Continuously-refilling byte bucket. rate=None disables limiting.
 
-    def __init__(self, rate):
+    `capacity` (the burst size) bounds how many tokens can accumulate while
+    output is stalled, and therefore how large a catch-up burst can be once it
+    resumes. Keep it small to smooth traffic on high-latency links; make it
+    larger to hold the average rate through jittery output.
+    """
+
+    def __init__(self, rate, burst):
         self.rate = rate
-        # Allow a burst of up to ~1s of traffic (but never less than one buffer).
-        self.capacity = max(rate, BUFSIZE) if rate else 0
+        self.capacity = max(1, int(burst)) if rate else 0
+        # Start empty so there is no burst at startup.
         self.tokens = 0.0
         self.last = time.monotonic()
 
@@ -177,21 +216,19 @@ class TokenBucket:
         self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
         self.last = now
 
-    def allowance(self):
-        """Bytes we may send right now (capped at BUFSIZE)."""
+    def take(self, want):
+        """Consume up to `want` bytes; return how many were granted now."""
         if self.rate is None:
-            return BUFSIZE
-        return min(BUFSIZE, int(self.tokens))
+            return want
+        grant = min(want, int(self.tokens))
+        self.tokens -= grant
+        return grant
 
-    def spend(self, n):
-        if self.rate is not None:
-            self.tokens -= n
-
-    def wait_time(self):
-        """Seconds until at least 1 byte is available (0 if unlimited/ready)."""
-        if self.rate is None or self.tokens >= 1:
+    def eta(self, want):
+        """Seconds until `want` tokens are available (0 if unlimited/ready)."""
+        if self.rate is None or self.tokens >= want:
             return 0.0
-        return (1 - self.tokens) / self.rate
+        return (want - self.tokens) / self.rate
 
 
 class RateMeter:
@@ -275,12 +312,20 @@ class StatusPrinter:
         self.line_dirty = False
 
 
-def run(base_rate, windows, stdin, stdout, status):
+def _chunk_size(bucket):
+    """Bytes to write per iteration: capped at the buffer and the burst size."""
+    if bucket.rate is None:
+        return BUFSIZE
+    return max(1, min(BUFSIZE, bucket.capacity))
+
+
+def run(base_rate, windows, burst, stdin, stdout, status):
     now = time.monotonic()
     sod = second_of_day(datetime.now())
     rate, label = active_window(windows, base_rate, sod)
 
-    bucket = TokenBucket(rate)
+    bucket = TokenBucket(rate, burst_for(rate, burst))
+    chunk_size = _chunk_size(bucket)
     meter = RateMeter()
     stats = WindowStats(label, rate, now)
     total_bytes = 0
@@ -296,17 +341,22 @@ def run(base_rate, windows, stdin, stdout, status):
         if cur_label != stats.label:
             status.freeze_summary(stats, now, "window ended")
             rate, label = cur_rate, cur_label
-            bucket = TokenBucket(rate)
+            bucket = TokenBucket(rate, burst_for(rate, burst))
+            chunk_size = _chunk_size(bucket)
             stats = WindowStats(label, rate, now)
 
         bucket.refill(now)
-        allowed = bucket.allowance()
+        # Aim to emit one evenly-sized chunk. If the tokens for a full chunk
+        # aren't there yet, sleep exactly long enough to earn them (bounded by
+        # the status interval so stats/window checks stay responsive), then send
+        # whatever we have. Small chunks + short waits = smooth, non-bursty output.
+        wait = min(bucket.eta(chunk_size), STATUS_INTERVAL)
+        if wait > 0:
+            time.sleep(wait)
+            bucket.refill(time.monotonic())
+        allowed = bucket.take(chunk_size)
 
-        if allowed <= 0:
-            # No budget yet: sleep until a byte frees up, but wake often enough
-            # to repaint stats and re-check the window boundary.
-            time.sleep(min(bucket.wait_time(), STATUS_INTERVAL))
-        else:
+        if allowed >= 1:
             chunk = stdin.read(allowed)
             if not chunk:
                 eof = True
@@ -314,7 +364,10 @@ def run(base_rate, windows, stdin, stdout, status):
                 stdout.write(chunk)
                 stdout.flush()
                 n = len(chunk)
-                bucket.spend(n)
+                # Refund any tokens we reserved but didn't use (short read).
+                if n < allowed:
+                    bucket.tokens += allowed - n
+                now = time.monotonic()
                 meter.add(now, n)
                 stats.bytes += n
                 total_bytes += n
@@ -342,7 +395,12 @@ def build_parser():
             "WINDOW is START-END:RATE using 24h HH:MM clock times, e.g.\n"
             "  -w 01:00-03:00:20MB   -w 23:00-02:00:unlimited (wraps midnight)\n"
             "Windows are matched in the order given; the first match wins and\n"
-            "overrides the base rate. Times are local.\n"
+            "overrides the base rate. Times are local.\n\n"
+            "BURST is the token-bucket capacity: the most that can be sent in one\n"
+            "catch-up spike after the output stalls. It defaults to ~0.1s of the\n"
+            "active rate. Lower it (e.g. --burst 16KB) for smoother output on\n"
+            "high-latency links (VPN/satellite); raise it to better hold the\n"
+            "average rate through bursty output.\n"
         ),
     )
     p.add_argument(
@@ -353,6 +411,10 @@ def build_parser():
         "-w", "--window", type=parse_window, action="append", default=[],
         dest="windows", metavar="START-END:RATE",
         help="time-of-day override; repeatable",
+    )
+    p.add_argument(
+        "-b", "--burst", type=parse_size, default=None, metavar="SIZE",
+        help="max burst size (default: ~0.1s of the active rate)",
     )
     return p
 
@@ -369,7 +431,7 @@ def main(argv=None):
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     try:
-        run(args.rate, args.windows, stdin, stdout, status)
+        run(args.rate, args.windows, args.burst, stdin, stdout, status)
     except KeyboardInterrupt:
         sys.stderr.write("\ninterrupted\n")
         sys.stderr.flush()

@@ -18,6 +18,25 @@ generate | pacer -r 1MB -w 01:00-03:00:20MB -w 03:00-07:00:unlimited | consume
 
 - `-r, --rate RATE` — base rate when no window matches (default: unlimited).
 - `-w, --window START-END:RATE` — repeatable time-of-day override.
+- `-b, --burst SIZE` — max catch-up burst (default: ~0.1s of the active rate).
+
+### Smoothness on high-latency links (`--burst`)
+
+pacer meters with a token bucket. Its *capacity* (the burst size) is how many
+tokens can pile up while the output is stalled — and therefore how big a
+catch-up spike is emitted once it resumes. On a high-latency link (VPN,
+satellite) the downstream `write()` blocks often as the send buffer fills, so a
+large capacity produces visible stop/start bursts.
+
+The burst defaults to ~0.1s of the active rate (small), and writes are paced in
+even chunks. If you still see burstiness, lower it:
+
+```
+tar cf - /data | pacer -r 512KB --burst 16KB | ssh sat-host 'cat > backup.tar'
+```
+
+Smaller `--burst` = smoother output but less able to recover the average rate
+across output jitter; larger = burstier but holds the average through stalls.
 
 ### Rates
 
