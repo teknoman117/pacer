@@ -416,11 +416,39 @@ def build_parser():
         "-b", "--burst", type=parse_size, default=None, metavar="SIZE",
         help="max burst size (default: ~0.1s of the active rate)",
     )
+    p.add_argument(
+        "-f", "--force", action="store_true",
+        help="read/write even if stdin or stdout is a terminal",
+    )
     return p
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    # pacer is a pipe filter. Unless forced, guard against terminal streams:
+    # reading a terminal would hang on typed input and writing one would spew raw
+    # bytes at the user, the way gzip/git guard their streams. Run bare in a
+    # terminal (both ends are ttys) and there's nothing to do but show help.
+    if not args.force:
+        stdin_tty = sys.stdin.isatty()
+        stdout_tty = sys.stdout.isatty()
+        if stdin_tty and stdout_tty:
+            parser.print_help()
+            return 0
+        if stdin_tty:
+            sys.stderr.write(
+                "pacer: cowardly refusing to read from a tty; "
+                "pipe data into stdin instead (or pass --force)\n"
+            )
+            return 2
+        if stdout_tty:
+            sys.stderr.write(
+                "pacer: cowardly refusing to write to a tty; "
+                "redirect or pipe stdout instead (or pass --force)\n"
+            )
+            return 2
 
     stdin = sys.stdin.buffer
     stdout = sys.stdout.buffer

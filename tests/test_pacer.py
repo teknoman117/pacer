@@ -9,6 +9,7 @@ end-to-end pump through ``run`` that both preserves bytes and honors the cap.
 
 import argparse
 import io
+import sys
 import time
 
 import pytest
@@ -313,3 +314,75 @@ def test_parser_accepts_full_invocation():
 def test_parser_rejects_bad_window():
     with pytest.raises(SystemExit):
         core.build_parser().parse_args(["-w", "01:00-03:00"])
+
+
+# --------------------------------------------------------------------------- #
+# main(): tty guard and happy path
+# --------------------------------------------------------------------------- #
+
+class _FakeStd:
+    """Stand-in for sys.stdin/stdout with a controllable isatty().
+
+    ``buffer`` carries the binary payload pacer pumps; text writes (e.g.
+    argparse's help output) are captured separately in ``text``.
+    """
+
+    def __init__(self, data=b"", tty=False):
+        self.buffer = io.BytesIO(data)
+        self.text = io.StringIO()
+        self._tty = tty
+
+    def isatty(self):
+        return self._tty
+
+    def write(self, s):
+        return self.text.write(s)
+
+    def flush(self):
+        pass
+
+
+def _wire_std(monkeypatch, stdin, stdout):
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+
+
+def test_main_refuses_to_read_from_tty(monkeypatch):
+    _wire_std(monkeypatch, _FakeStd(tty=True), _FakeStd(tty=False))
+    rc = core.main([])
+    assert rc == 2
+    assert "cowardly refusing to read from a tty" in sys.stderr.getvalue()
+
+
+def test_main_refuses_to_write_to_tty(monkeypatch):
+    _wire_std(monkeypatch, _FakeStd(b"data", tty=False), _FakeStd(tty=True))
+    rc = core.main([])
+    assert rc == 2
+    assert "cowardly refusing to write to a tty" in sys.stderr.getvalue()
+
+
+def test_main_both_ttys_prints_help(monkeypatch):
+    out = _FakeStd(tty=True)
+    _wire_std(monkeypatch, _FakeStd(tty=True), out)
+    rc = core.main([])
+    assert rc == 0
+    assert "usage: pacer" in out.text.getvalue()
+
+
+def test_main_force_bypasses_tty_guard(monkeypatch):
+    data = b"forced" * 50
+    out = _FakeStd(tty=True)
+    _wire_std(monkeypatch, _FakeStd(data, tty=True), out)
+    rc = core.main(["--force"])
+    assert rc == 0
+    assert out.buffer.getvalue() == data
+
+
+def test_main_pipes_when_neither_is_a_tty(monkeypatch):
+    data = b"payload" * 100
+    out = _FakeStd(tty=False)
+    _wire_std(monkeypatch, _FakeStd(data, tty=False), out)
+    rc = core.main([])  # unlimited, no windows
+    assert rc == 0
+    assert out.buffer.getvalue() == data

@@ -29,6 +29,11 @@ generate | pacer -r 1MB -w 01:00-03:00:20MB -w 03:00-07:00:unlimited | consume
 - `-r, --rate RATE` — base rate when no window matches (default: unlimited).
 - `-w, --window START-END:RATE` — repeatable time-of-day override.
 - `-b, --burst SIZE` — max catch-up burst (default: ~0.1s of the active rate).
+- `-f, --force` — read/write even if stdin or stdout is a terminal.
+
+As a pipe filter, pacer refuses to read from or write to a terminal (it would
+hang on typed input or spew raw bytes). Run bare in a terminal it just prints
+this help; pass `--force` to override the guard.
 
 ### Smoothness on high-latency links (`--burst`)
 

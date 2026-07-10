@@ -167,6 +167,13 @@ emitted on a window boundary, at EOF, and on Ctrl-C.
 - stdin/stdout are used in **binary** mode (`sys.std*.buffer`); stdout is flushed
   after every write so downstream sees data promptly rather than in Python
   buffer-sized gulps.
+- **TTY guard.** As a pipe filter, pacer guards its data streams: if exactly one
+  of stdin/stdout is a terminal it exits 2 with a "cowardly refusing to
+  read/write to a tty" message (reading a terminal would hang on typed input;
+  writing one would dump raw bytes at the user); if *both* are terminals — bare
+  `pacer` with no redirection — there's nothing to pump, so it just prints help
+  and exits 0. `--force` bypasses the guard entirely. (stderr may always be a
+  tty; that is where the live status goes.)
 - **SIGINT** is restored to the default handler so Ctrl-C raises
   `KeyboardInterrupt`; `main()` prints the in-progress summary and exits 130.
 - **BrokenPipeError** (downstream closed early, e.g. `| head`) exits 0 quietly.
