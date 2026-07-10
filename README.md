@@ -10,6 +10,16 @@ window's summary is frozen on its own line and a fresh counter starts below it.
 
 Data flows on stdout, so pacer drops transparently into any pipeline.
 
+## Install
+
+```
+pip install .            # or: pip install -e .   for development
+```
+
+This puts a `pacer` command on your `PATH`. Requires Python 3.8+ and has no
+runtime dependencies. You can also run it without installing via
+`python -m pacer` (from `src/`) or `python src/pacer/core.py`.
+
 ## Usage
 
 ```
@@ -67,3 +77,18 @@ tar cf - /data | pacer -r 512KB -w 00:00-06:00:10MB | ssh host 'cat > backup.tar
 
 Ctrl-C prints the in-progress window's summary and exits; a closed downstream
 (e.g. `| head`) exits quietly.
+
+## Development
+
+```
+pip install -e '.[test]'
+pytest
+```
+
+See [DESIGN.md](DESIGN.md) for the architecture and the rationale behind the
+token bucket, burst sizing, and the window grammar.
+
+## License
+
+BSD 3-Clause — see [LICENSE](LICENSE).
+Nathan Lewis &lt;git@nrlewis.dev&gt;

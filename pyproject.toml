@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pacer"
+version = "0.1.0"
+description = "Pipe stdin to stdout at a bandwidth capped by time of day."
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{ name = "Nathan Lewis", email = "git@nrlewis.dev" }]
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+keywords = ["bandwidth", "rate-limit", "throttle", "pipe", "traffic-shaping"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.scripts]
+pacer = "pacer.core:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
